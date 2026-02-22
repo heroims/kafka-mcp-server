@@ -196,3 +196,42 @@ func TestListTopics(t *testing.T) {
 	}
 	assert.True(t, found, "Expected to find topic '%s' in the list %v", topicToCreate, topics)
 }
+
+func TestConsumeMessagesByTime(t *testing.T) {
+	if testKafkaContainer == nil {
+		t.Skip("Skipping test: Kafka container not available")
+	}
+	require.NotEmpty(t, testKafkaBrokers, "Kafka brokers should be set by TestMain")
+
+	cfg := getTestConfig()
+	client, err := NewClient(cfg)
+	require.NoError(t, err)
+	require.NotNil(t, client)
+	defer client.Close()
+
+	ctx := context.Background()
+	topic := "test-time-range-" + time.Now().Format("20060102150405")
+
+	now := time.Now().UnixMilli()
+	for i := 0; i < 5; i++ {
+		err = client.ProduceMessage(ctx, topic, nil, []byte(fmt.Sprintf("message-%d", i)))
+		require.NoError(t, err)
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	startTime := now - 1000
+	endTime := time.Now().UnixMilli()
+
+	messages, err := client.ConsumeMessagesByTime(ctx, []string{topic}, startTime, endTime, 10)
+	require.NoError(t, err)
+	require.NotEmpty(t, messages, "Should consume messages within time range")
+
+	for _, msg := range messages {
+		assert.True(t, msg.Timestamp >= startTime, "Message timestamp should be >= start_time")
+		assert.True(t, msg.Timestamp <= endTime, "Message timestamp should be <= end_time")
+	}
+
+	t.Logf("Consumed %d messages within time range [%d, %d]", len(messages), startTime, endTime)
+}
