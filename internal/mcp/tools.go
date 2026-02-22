@@ -27,7 +27,7 @@ func RegisterTools(s *server.MCPServer, kafkaClient kafka.KafkaClient, cfg confi
 		topic := req.GetString("topic", "")
 		keyArg := req.GetString("key", "")
 		value := req.GetString("value", "")
-		
+
 		if topic == "" {
 			return mcp.NewToolResultError("Missing required parameter: topic (string)"), nil
 		}
@@ -62,7 +62,7 @@ func RegisterTools(s *server.MCPServer, kafkaClient kafka.KafkaClient, cfg confi
 
 	s.AddTool(consumeTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) { // Use mcp.CallToolRequest, mcp.CallToolResult
 		topicsArg := req.GetStringSlice("topics", []string{})
-		
+
 		// Handle max_messages parameter with default
 		maxMessages := int(req.GetFloat("max_messages", 10))
 
@@ -367,6 +367,50 @@ func RegisterTools(s *server.MCPServer, kafkaClient kafka.KafkaClient, cfg confi
 		}
 
 		slog.InfoContext(ctx, "Successfully listed topics", "count", len(topics))
+		return mcp.NewToolResultText(string(jsonData)), nil
+	})
+
+	// --- consume_messages_by_time tool definition and handler ---
+	consumeByTimeTool := mcp.NewTool("consume_messages_by_time",
+		mcp.WithDescription("Consumes messages from Kafka topics within a specified time range. Use this tool to retrieve messages that were produced during a specific time period. Requires specifying start and end timestamps in Unix milliseconds."),
+		mcp.WithArray("topics", mcp.Required(), mcp.Description("Array of Kafka topic names to consume messages from."), mcp.Items(map[string]any{"type": "string"})),
+		mcp.WithNumber("start_time", mcp.Required(), mcp.Description("Start time in Unix milliseconds (e.g., 1705315800000). Messages after this time will be consumed.")),
+		mcp.WithNumber("end_time", mcp.Required(), mcp.Description("End time in Unix milliseconds. Messages before this time will be consumed.")),
+		mcp.WithNumber("max_messages", mcp.Description("Maximum number of messages to consume (default: 10).")),
+	)
+
+	s.AddTool(consumeByTimeTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		topicsArg := req.GetStringSlice("topics", []string{})
+		startTime := int64(req.GetFloat("start_time", 0))
+		endTime := int64(req.GetFloat("end_time", 0))
+		maxMessages := int(req.GetFloat("max_messages", 10))
+
+		if len(topicsArg) == 0 {
+			return mcp.NewToolResultError("No valid topics provided."), nil
+		}
+		if startTime <= 0 || endTime <= 0 {
+			return mcp.NewToolResultError("Invalid start_time or end_time: must be positive Unix timestamps"), nil
+		}
+		if startTime >= endTime {
+			return mcp.NewToolResultError("start_time must be less than end_time"), nil
+		}
+
+		slog.InfoContext(ctx, "Executing consume_messages_by_time tool", "topics", topicsArg, "startTime", startTime, "endTime", endTime, "maxMessages", maxMessages)
+
+		messages, err := kafkaClient.ConsumeMessagesByTime(ctx, topicsArg, startTime, endTime, maxMessages)
+		if err != nil {
+			slog.ErrorContext(ctx, "Failed to consume messages by time", "error", err)
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to consume messages: %v", err)), nil
+		}
+
+		slog.InfoContext(ctx, "Successfully consumed messages by time", "count", len(messages))
+
+		jsonData, marshalErr := json.Marshal(messages)
+		if marshalErr != nil {
+			slog.ErrorContext(ctx, "Failed to marshal messages to JSON", "error", marshalErr)
+			return mcp.NewToolResultError("Internal server error: failed to marshal results"), nil
+		}
+
 		return mcp.NewToolResultText(string(jsonData)), nil
 	})
 
