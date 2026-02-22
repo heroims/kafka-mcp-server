@@ -274,7 +274,204 @@ func (c *Client) ConsumeMessages(ctx context.Context, topics []string, maxMessag
 
 // ConsumeMessagesByTime consumes messages from topics within a specified time range.
 func (c *Client) ConsumeMessagesByTime(ctx context.Context, topics []string, startTime, endTime int64, maxMessages int) ([]Message, error) {
-	return nil, fmt.Errorf("ConsumeMessagesByTime not implemented")
+	if startTime >= endTime {
+		return nil, fmt.Errorf("start_time must be less than end_time")
+	}
+
+	slog.InfoContext(ctx, "Consuming messages by time range", "topics", topics, "startTime", startTime, "endTime", endTime, "maxMessages", maxMessages)
+
+	topicPartitions, err := c.getTopicPartitions(ctx, topics)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get topic partitions: %w", err)
+	}
+
+	offsets, err := c.getOffsetsForTimeRange(ctx, topicPartitions, startTime, endTime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get offsets for time range: %w", err)
+	}
+
+	messages, err := c.consumeByOffsets(ctx, topicPartitions, offsets, maxMessages)
+	if err != nil {
+		return nil, fmt.Errorf("failed to consume messages: %w", err)
+	}
+
+	slog.InfoContext(ctx, "Successfully consumed messages by time range", "count", len(messages))
+	return messages, nil
+}
+
+// getTopicPartitions returns partition IDs for given topics
+func (c *Client) getTopicPartitions(ctx context.Context, topics []string) (map[string][]int32, error) {
+	req := kmsg.NewMetadataRequest()
+	for _, topic := range topics {
+		topicReq := kmsg.NewMetadataRequestTopic()
+		topicReq.Topic = kmsg.StringPtr(topic)
+		req.Topics = append(req.Topics, topicReq)
+	}
+
+	shardedResp := c.kgoClient.RequestSharded(ctx, &req)
+	topicPartitions := make(map[string][]int32)
+
+	for _, shard := range shardedResp {
+		if shard.Err != nil {
+			continue
+		}
+		resp, ok := shard.Resp.(*kmsg.MetadataResponse)
+		if !ok {
+			continue
+		}
+		for _, topic := range resp.Topics {
+			if topic.Topic == nil || topic.ErrorCode != 0 {
+				continue
+			}
+			for _, p := range topic.Partitions {
+				topicPartitions[*topic.Topic] = append(topicPartitions[*topic.Topic], p.Partition)
+			}
+		}
+	}
+
+	if len(topicPartitions) == 0 {
+		return nil, fmt.Errorf("no topics found: %v", topics)
+	}
+
+	return topicPartitions, nil
+}
+
+// OffsetRange represents start and end offsets for a partition
+type OffsetRange struct {
+	Start int64
+	End   int64
+}
+
+// getOffsetsForTimeRange gets start and end offsets for each topic-partition
+func (c *Client) getOffsetsForTimeRange(ctx context.Context, topicPartitions map[string][]int32, startTime, endTime int64) (map[string]map[int32]OffsetRange, error) {
+	startOffsets, err := c.getOffsetsByTimestamp(ctx, topicPartitions, startTime)
+	if err != nil {
+		return nil, err
+	}
+
+	endOffsets, err := c.getOffsetsByTimestamp(ctx, topicPartitions, endTime)
+	if err != nil {
+		return nil, err
+	}
+
+	offsets := make(map[string]map[int32]OffsetRange)
+	for topic, partitions := range topicPartitions {
+		offsets[topic] = make(map[int32]OffsetRange)
+		for _, partition := range partitions {
+			startOffset := startOffsets[topic][partition]
+			endOffset := endOffsets[topic][partition]
+			if startOffset >= 0 && endOffset >= startOffset {
+				offsets[topic][partition] = OffsetRange{
+					Start: startOffset,
+					End:   endOffset,
+				}
+			}
+		}
+	}
+
+	return offsets, nil
+}
+
+// getOffsetsByTimestamp gets the offset for each partition at a given timestamp
+func (c *Client) getOffsetsByTimestamp(ctx context.Context, topicPartitions map[string][]int32, timestamp int64) (map[string]map[int32]int64, error) {
+	req := kmsg.NewListOffsetsRequest()
+	req.ReplicaID = -1
+
+	for topic, partitions := range topicPartitions {
+		topicReq := kmsg.NewListOffsetsRequestTopic()
+		topicReq.Topic = topic
+		for _, partition := range partitions {
+			partitionReq := kmsg.NewListOffsetsRequestTopicPartition()
+			partitionReq.Partition = partition
+			partitionReq.Timestamp = timestamp
+			topicReq.Partitions = append(topicReq.Partitions, partitionReq)
+		}
+		req.Topics = append(req.Topics, topicReq)
+	}
+
+	shardedResp := c.kgoClient.RequestSharded(ctx, &req)
+	result := make(map[string]map[int32]int64)
+
+	for topic := range topicPartitions {
+		result[topic] = make(map[int32]int64)
+	}
+
+	for _, shard := range shardedResp {
+		if shard.Err != nil {
+			continue
+		}
+		resp, ok := shard.Resp.(*kmsg.ListOffsetsResponse)
+		if !ok {
+			continue
+		}
+		for _, topic := range resp.Topics {
+			for _, partition := range topic.Partitions {
+				if partition.ErrorCode == 0 {
+					result[topic.Topic][partition.Partition] = partition.Offset
+				}
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// consumeByOffsets consumes messages from specified offset ranges
+func (c *Client) consumeByOffsets(ctx context.Context, topicPartitions map[string][]int32, offsets map[string]map[int32]OffsetRange, maxMessages int) ([]Message, error) {
+	partitionOffsets := make(map[string]map[int32]kgo.Offset)
+	for topic, partitions := range topicPartitions {
+		partitionOffsets[topic] = make(map[int32]kgo.Offset)
+		for _, partition := range partitions {
+			if rangeVal, ok := offsets[topic][partition]; ok {
+				partitionOffsets[topic][partition] = kgo.NewOffset().At(rangeVal.Start)
+			}
+		}
+	}
+
+	fetchOpts := []kgo.Opt{
+		kgo.ConsumePartitions(partitionOffsets),
+	}
+
+	fetchClient, err := kgo.NewClient(fetchOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create fetch client: %w", err)
+	}
+	defer fetchClient.Close()
+
+	fetches := fetchClient.PollFetches(ctx)
+	if fetches.IsClientClosed() {
+		return nil, fmt.Errorf("client is closed")
+	}
+
+	errs := fetches.Errors()
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("fetch error: %w", errs[0].Err)
+	}
+
+	messages := make([]Message, 0, maxMessages)
+	iter := fetches.RecordIter()
+	count := 0
+
+	for !iter.Done() && count < maxMessages {
+		rec := iter.Next()
+		rangeVal, ok := offsets[rec.Topic][rec.Partition]
+		if !ok {
+			continue
+		}
+		if rec.Offset >= rangeVal.Start && rec.Offset <= rangeVal.End {
+			messages = append(messages, Message{
+				Topic:     rec.Topic,
+				Partition: rec.Partition,
+				Offset:    rec.Offset,
+				Key:       string(rec.Key),
+				Value:     string(rec.Value),
+				Timestamp: rec.Timestamp.UnixMilli(),
+			})
+			count++
+		}
+	}
+
+	return messages, nil
 }
 
 // ListTopics retrieves a list of topic names from the Kafka cluster.
