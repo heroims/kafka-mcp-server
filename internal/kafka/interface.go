@@ -15,6 +15,15 @@ type KafkaClient interface {
 	// It returns a slice of consumed messages or an error.
 	ConsumeMessages(ctx context.Context, topics []string, maxMessages int) ([]Message, error)
 
+	// ConsumeMessagesByTime consumes messages from topics within a specified time range.
+	// Parameters:
+	//   - topics: list of topic names to consume from
+	//   - startTime: start time in Unix milliseconds
+	//   - endTime: end time in Unix milliseconds
+	//   - maxMessages: maximum number of messages to return
+	// Returns: slice of Message or error
+	ConsumeMessagesByTime(ctx context.Context, topics []string, startTime, endTime int64, maxMessages int) ([]Message, error)
+
 	// ListTopics retrieves a list of topic names from the Kafka cluster.
 	ListTopics(ctx context.Context) ([]string, error)
 

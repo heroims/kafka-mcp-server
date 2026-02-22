@@ -272,6 +272,11 @@ func (c *Client) ConsumeMessages(ctx context.Context, topics []string, maxMessag
 	return consumedMessages, nil
 }
 
+// ConsumeMessagesByTime consumes messages from topics within a specified time range.
+func (c *Client) ConsumeMessagesByTime(ctx context.Context, topics []string, startTime, endTime int64, maxMessages int) ([]Message, error) {
+	return nil, fmt.Errorf("ConsumeMessagesByTime not implemented")
+}
+
 // ListTopics retrieves a list of topic names from the Kafka cluster.
 func (c *Client) ListTopics(ctx context.Context) ([]string, error) {
 	// Use kmsg.NewMetadataRequest() to create the request struct
