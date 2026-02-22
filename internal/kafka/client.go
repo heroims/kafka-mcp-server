@@ -5,8 +5,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
-
 	"os"
+	"time"
 
 	"github.com/tuannvm/kafka-mcp-server/internal/config"
 	"github.com/twmb/franz-go/pkg/kerr"
@@ -121,6 +121,7 @@ type ClusterOverviewResult struct {
 // Client wraps the franz-go Kafka client.
 type Client struct {
 	kgoClient *kgo.Client
+	cfg       config.Config
 }
 
 // NewClient creates and initializes a new Kafka client based on the provided configuration.
@@ -201,7 +202,7 @@ func NewClient(cfg config.Config) (*Client, error) {
 	}
 	slog.Info("Successfully pinged Kafka brokers")
 
-	return &Client{kgoClient: cl}, nil
+	return &Client{kgoClient: cl, cfg: cfg}, nil
 }
 
 // ProduceMessage sends a message to the specified Kafka topic.
@@ -426,7 +427,8 @@ func (c *Client) getOffsetsByTimestamp(ctx context.Context, topicPartitions map[
 }
 
 // consumeByOffsetsWithGroup consumes messages from specified offset ranges using consumer group.
-// If reset is true, seeks to start offsets; otherwise resumes from committed offsets.
+// If reset is true, creates a new client to consume from start offsets;
+// otherwise uses existing client to resume from committed offsets.
 func (c *Client) consumeByOffsetsWithGroup(ctx context.Context, topicPartitions map[string][]int32, offsets map[string]map[int32]OffsetRange, maxMessages int, reset bool) ([]Message, error) {
 	partitionOffsets := make(map[string]map[int32]kgo.Offset)
 	for topic, partitions := range topicPartitions {
@@ -438,6 +440,67 @@ func (c *Client) consumeByOffsetsWithGroup(ctx context.Context, topicPartitions 
 		}
 	}
 
+	topicList := make([]string, 0, len(topicPartitions))
+	for topic := range topicPartitions {
+		topicList = append(topicList, topic)
+	}
+
+	if reset {
+		slog.InfoContext(ctx, "Reset mode: creating new client to consume from start offsets")
+		clientID := fmt.Sprintf("consume-by-time-reset-%d", time.Now().UnixNano())
+		opts := []kgo.Opt{
+			kgo.SeedBrokers(c.cfg.KafkaBrokers...),
+			kgo.ClientID(clientID),
+			kgo.ConsumerGroup("consume-by-time-group"),
+			kgo.ConsumeTopics(topicList...),
+			kgo.DisableAutoCommit(),
+		}
+		tempClient, err := kgo.NewClient(opts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create temp client: %w", err)
+		}
+		defer tempClient.Close()
+
+		tempClient.AddConsumePartitions(partitionOffsets)
+
+		fetches := tempClient.PollFetches(ctx)
+		if fetches.IsClientClosed() {
+			return nil, fmt.Errorf("client is closed")
+		}
+
+		errs := fetches.Errors()
+		if len(errs) > 0 {
+			return nil, fmt.Errorf("fetch error: %w", errs[0].Err)
+		}
+
+		messages := make([]Message, 0, maxMessages)
+		iter := fetches.RecordIter()
+		count := 0
+
+		for !iter.Done() && count < maxMessages {
+			rec := iter.Next()
+			rangeVal, ok := offsets[rec.Topic][rec.Partition]
+			if !ok {
+				continue
+			}
+			if rec.Offset >= rangeVal.Start && rec.Offset <= rangeVal.End {
+				messages = append(messages, Message{
+					Topic:     rec.Topic,
+					Partition: rec.Partition,
+					Offset:    rec.Offset,
+					Key:       string(rec.Key),
+					Value:     string(rec.Value),
+					Timestamp: rec.Timestamp.UnixMilli(),
+				})
+				count++
+			}
+		}
+
+		slog.InfoContext(ctx, "Reset mode: consumed messages", "count", len(messages))
+		return messages, nil
+	}
+
+	slog.InfoContext(ctx, "Resume mode: consuming from committed offsets")
 	c.kgoClient.AddConsumePartitions(partitionOffsets)
 
 	slog.InfoContext(ctx, "Polling for messages by time range", "maxMessages", maxMessages)
