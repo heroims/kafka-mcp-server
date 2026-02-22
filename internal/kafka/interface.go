@@ -16,13 +16,15 @@ type KafkaClient interface {
 	ConsumeMessages(ctx context.Context, topics []string, maxMessages int) ([]Message, error)
 
 	// ConsumeMessagesByTime consumes messages from topics within a specified time range.
+	// Uses consumer group for offset management to support resumable consumption.
 	// Parameters:
 	//   - topics: list of topic names to consume from
 	//   - startTime: start time in Unix milliseconds
 	//   - endTime: end time in Unix milliseconds
 	//   - maxMessages: maximum number of messages to return
+	//   - reset: if true, reset consumer group offset to startTime; if false, resume from committed offset
 	// Returns: slice of Message or error
-	ConsumeMessagesByTime(ctx context.Context, topics []string, startTime, endTime int64, maxMessages int) ([]Message, error)
+	ConsumeMessagesByTime(ctx context.Context, topics []string, startTime, endTime int64, maxMessages int, reset bool) ([]Message, error)
 
 	// ListTopics retrieves a list of topic names from the Kafka cluster.
 	ListTopics(ctx context.Context) ([]string, error)

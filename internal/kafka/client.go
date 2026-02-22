@@ -273,12 +273,21 @@ func (c *Client) ConsumeMessages(ctx context.Context, topics []string, maxMessag
 }
 
 // ConsumeMessagesByTime consumes messages from topics within a specified time range.
-func (c *Client) ConsumeMessagesByTime(ctx context.Context, topics []string, startTime, endTime int64, maxMessages int) ([]Message, error) {
+// Uses consumer group for offset management to support resumable consumption.
+// Parameters:
+//   - topics: list of topic names to consume from
+//   - startTime: start time in Unix milliseconds
+//   - endTime: end time in Unix milliseconds
+//   - maxMessages: maximum number of messages to return
+//   - reset: if true, reset consumer group offset to startTime; if false, resume from committed offset
+//
+// Returns: slice of Message or error
+func (c *Client) ConsumeMessagesByTime(ctx context.Context, topics []string, startTime, endTime int64, maxMessages int, reset bool) ([]Message, error) {
 	if startTime >= endTime {
 		return nil, fmt.Errorf("start_time must be less than end_time")
 	}
 
-	slog.InfoContext(ctx, "Consuming messages by time range", "topics", topics, "startTime", startTime, "endTime", endTime, "maxMessages", maxMessages)
+	slog.InfoContext(ctx, "Consuming messages by time range", "topics", topics, "startTime", startTime, "endTime", endTime, "maxMessages", maxMessages, "reset", reset)
 
 	topicPartitions, err := c.getTopicPartitions(ctx, topics)
 	if err != nil {
@@ -290,7 +299,7 @@ func (c *Client) ConsumeMessagesByTime(ctx context.Context, topics []string, sta
 		return nil, fmt.Errorf("failed to get offsets for time range: %w", err)
 	}
 
-	messages, err := c.consumeByOffsets(ctx, topicPartitions, offsets, maxMessages)
+	messages, err := c.consumeByOffsetsWithGroup(ctx, topicPartitions, offsets, maxMessages, reset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to consume messages: %w", err)
 	}
@@ -416,8 +425,9 @@ func (c *Client) getOffsetsByTimestamp(ctx context.Context, topicPartitions map[
 	return result, nil
 }
 
-// consumeByOffsets consumes messages from specified offset ranges
-func (c *Client) consumeByOffsets(ctx context.Context, topicPartitions map[string][]int32, offsets map[string]map[int32]OffsetRange, maxMessages int) ([]Message, error) {
+// consumeByOffsetsWithGroup consumes messages from specified offset ranges using consumer group.
+// If reset is true, seeks to start offsets; otherwise resumes from committed offsets.
+func (c *Client) consumeByOffsetsWithGroup(ctx context.Context, topicPartitions map[string][]int32, offsets map[string]map[int32]OffsetRange, maxMessages int, reset bool) ([]Message, error) {
 	partitionOffsets := make(map[string]map[int32]kgo.Offset)
 	for topic, partitions := range topicPartitions {
 		partitionOffsets[topic] = make(map[int32]kgo.Offset)
@@ -428,17 +438,11 @@ func (c *Client) consumeByOffsets(ctx context.Context, topicPartitions map[strin
 		}
 	}
 
-	fetchOpts := []kgo.Opt{
-		kgo.ConsumePartitions(partitionOffsets),
-	}
+	c.kgoClient.AddConsumePartitions(partitionOffsets)
 
-	fetchClient, err := kgo.NewClient(fetchOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create fetch client: %w", err)
-	}
-	defer fetchClient.Close()
+	slog.InfoContext(ctx, "Polling for messages by time range", "maxMessages", maxMessages)
 
-	fetches := fetchClient.PollFetches(ctx)
+	fetches := c.kgoClient.PollFetches(ctx)
 	if fetches.IsClientClosed() {
 		return nil, fmt.Errorf("client is closed")
 	}
@@ -468,6 +472,12 @@ func (c *Client) consumeByOffsets(ctx context.Context, topicPartitions map[strin
 				Timestamp: rec.Timestamp.UnixMilli(),
 			})
 			count++
+		}
+	}
+
+	if count > 0 {
+		if err := c.kgoClient.CommitRecords(ctx); err != nil {
+			slog.WarnContext(ctx, "Failed to commit offsets", "error", err)
 		}
 	}
 

@@ -372,11 +372,12 @@ func RegisterTools(s *server.MCPServer, kafkaClient kafka.KafkaClient, cfg confi
 
 	// --- consume_messages_by_time tool definition and handler ---
 	consumeByTimeTool := mcp.NewTool("consume_messages_by_time",
-		mcp.WithDescription("Consumes messages from Kafka topics within a specified time range. Use this tool to retrieve messages that were produced during a specific time period. Requires specifying start and end timestamps in Unix milliseconds."),
+		mcp.WithDescription("Consumes messages from Kafka topics within a specified time range. Use this tool to retrieve messages that were produced during a specific time period. Requires specifying start and end timestamps in Unix milliseconds. Uses consumer group for offset management - subsequent calls will resume from where left off unless reset is true."),
 		mcp.WithArray("topics", mcp.Required(), mcp.Description("Array of Kafka topic names to consume messages from."), mcp.Items(map[string]any{"type": "string"})),
 		mcp.WithNumber("start_time", mcp.Required(), mcp.Description("Start time in Unix milliseconds (e.g., 1705315800000). Messages after this time will be consumed.")),
 		mcp.WithNumber("end_time", mcp.Required(), mcp.Description("End time in Unix milliseconds. Messages before this time will be consumed.")),
 		mcp.WithNumber("max_messages", mcp.Description("Maximum number of messages to consume (default: 10).")),
+		mcp.WithBoolean("reset", mcp.Description("If true, reset consumer group offset to start_time and consume from beginning. If false (default), resume from the last consumed offset.")),
 	)
 
 	s.AddTool(consumeByTimeTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -384,6 +385,7 @@ func RegisterTools(s *server.MCPServer, kafkaClient kafka.KafkaClient, cfg confi
 		startTime := int64(req.GetFloat("start_time", 0))
 		endTime := int64(req.GetFloat("end_time", 0))
 		maxMessages := int(req.GetFloat("max_messages", 10))
+		reset := req.GetBool("reset", false)
 
 		if len(topicsArg) == 0 {
 			return mcp.NewToolResultError("No valid topics provided."), nil
@@ -395,9 +397,9 @@ func RegisterTools(s *server.MCPServer, kafkaClient kafka.KafkaClient, cfg confi
 			return mcp.NewToolResultError("start_time must be less than end_time"), nil
 		}
 
-		slog.InfoContext(ctx, "Executing consume_messages_by_time tool", "topics", topicsArg, "startTime", startTime, "endTime", endTime, "maxMessages", maxMessages)
+		slog.InfoContext(ctx, "Executing consume_messages_by_time tool", "topics", topicsArg, "startTime", startTime, "endTime", endTime, "maxMessages", maxMessages, "reset", reset)
 
-		messages, err := kafkaClient.ConsumeMessagesByTime(ctx, topicsArg, startTime, endTime, maxMessages)
+		messages, err := kafkaClient.ConsumeMessagesByTime(ctx, topicsArg, startTime, endTime, maxMessages, reset)
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to consume messages by time", "error", err)
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to consume messages: %v", err)), nil

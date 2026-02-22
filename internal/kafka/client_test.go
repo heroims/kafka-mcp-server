@@ -224,7 +224,7 @@ func TestConsumeMessagesByTime(t *testing.T) {
 	startTime := now - 1000
 	endTime := time.Now().UnixMilli()
 
-	messages, err := client.ConsumeMessagesByTime(ctx, []string{topic}, startTime, endTime, 10)
+	messages, err := client.ConsumeMessagesByTime(ctx, []string{topic}, startTime, endTime, 10, true)
 	require.NoError(t, err)
 	require.NotEmpty(t, messages, "Should consume messages within time range")
 
