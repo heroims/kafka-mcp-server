@@ -53,6 +53,77 @@ Consumes messages from one or more Kafka topics in a single batch operation. Use
 ]
 ```
 
+## consume_messages_by_time
+
+Consumes messages from one or more Kafka topics filtered by a timestamp range. Supports resumable pagination via the reset flag. When reset is true, the tool seeks to the startTime and begins consumption from there; when reset is false, it resumes from previously committed offsets. This is useful for retrieving messages within a specific time window or for paginating through large time ranges.
+
+**Sample Prompt:**
+> "Get all messages from the web3_token_events topic between February 22, 2026 at 12:34 and 12:35, limit to 1000 messages."
+
+**Parameters:**
+- `topics` (array, required): List of topic names to consume from
+- `startTime` (integer, required): Start timestamp in Unix milliseconds (e.g., 1771834134000)
+- `endTime` (integer, required): End timestamp in Unix milliseconds (e.g., 1771834194000)
+- `maxMessages` (integer, required): Maximum number of messages to retrieve (e.g., 1000)
+- `reset` (boolean, required): 
+  - `true`: Seek from startTime and start fresh consumption (deletes previous consumer group state)
+  - `false`: Resume from the last committed offsets for each partition
+
+**Example (reset=true - first call):**
+```json
+{
+  "topics": ["web3_token_events"],
+  "startTime": 1771834134000,
+  "endTime": 1771834194000,
+  "maxMessages": 1000,
+  "reset": true
+}
+```
+
+**Example (reset=false - resuming pagination):**
+```json
+{
+  "topics": ["web3_token_events"],
+  "startTime": 1771834134000,
+  "endTime": 1771834194000,
+  "maxMessages": 1000,
+  "reset": false
+}
+```
+
+**Response:**
+```json
+[
+  {
+    "topic": "web3_token_events",
+    "partition": 0,
+    "offset": 12345,
+    "timestamp": 1771834135000,
+    "key": "event-123",
+    "value": "{\"token\":\"USDC\",\"amount\":\"1000\",\"event\":\"transfer\"}"
+  },
+  {
+    "topic": "web3_token_events",
+    "partition": 1,
+    "offset": 12346,
+    "timestamp": 1771834136000,
+    "key": "event-124",
+    "value": "{\"token\":\"USDT\",\"amount\":\"5000\",\"event\":\"mint\"}"
+  }
+]
+```
+
+**Workflow - Pagination Example:**
+1. First call with `reset=true`: 
+   ```
+   GET messages from Feb 22, 12:34-12:35 (reset=true) → Returns first 1000 messages
+   ```
+2. Second call with `reset=false`:
+   ```
+   GET more messages from same time range (reset=false) → Returns next batch from committed offsets
+   ```
+3. Repeat until fewer messages returned than maxMessages (indicates end of range)
+
 ## list_brokers
 
 Lists all configured Kafka broker addresses that the server is connecting to. Use this tool to verify connectivity and understand the cluster topology. Returns the broker hostnames and ports as configured.

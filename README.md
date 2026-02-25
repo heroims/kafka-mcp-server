@@ -284,6 +284,7 @@ The server exposes the following tools for Kafka interaction. For detailed docum
 
 - **produce_message**: Produces messages to Kafka topics
 - **consume_messages**: Consumes messages from Kafka topics in batch operations
+- **consume_messages_by_time**: Consumes messages from topics within a specified timestamp range. Supports pagination via the reset flag. When reset is true, consumption starts from startTime; when reset is false, it resumes from the last committed offsets. Uses kadm to obtain and commit offsets for efficient paging.
 - **list_brokers**: Lists all configured Kafka broker addresses
 - **describe_topic**: Provides comprehensive metadata for specific topics
 - **list_consumer_groups**: Enumerates all consumer groups in the cluster
