@@ -328,7 +328,13 @@ func (c *Client) ConsumeMessagesByTime(ctx context.Context, topics []string, sta
 		kgo.SeedBrokers(c.cfg.KafkaBrokers...),
 		kgo.ConsumerGroup(c.cfg.KafkaClientID),
 		kgo.ConsumeTopics(topics...),
+		kgo.FetchMaxBytes(60 * 1024 * 1024),
+		kgo.MaxConcurrentFetches(50),
 		kgo.DisableAutoCommit(),
+	}
+	if !reset {
+		useOffset := kgo.NewOffset().AtCommitted()
+		opts = append(opts, kgo.ConsumeResetOffset(useOffset))
 	}
 
 	client, err := kgo.NewClient(opts...)
@@ -336,35 +342,37 @@ func (c *Client) ConsumeMessagesByTime(ctx context.Context, topics []string, sta
 		return nil, fmt.Errorf("failed to create client: %w", err)
 	}
 	defer client.Close()
-
-	fetches := client.PollRecords(ctx, maxMessages)
-	if fetches.IsClientClosed() {
-		return nil, fmt.Errorf("client is closed")
-	}
-
-	if errs := fetches.Errors(); len(errs) > 0 {
-		return nil, fmt.Errorf("fetch error: %w", errs[0].Err)
-	}
-
 	messages := make([]Message, 0, maxMessages)
-	tmpRecords := fetches.Records()
-	for _, rec := range tmpRecords {
-		ts := rec.Timestamp.UnixMilli()
-		if ts >= startTime && ts <= endTime {
-			messages = append(messages, Message{
-				Topic:     rec.Topic,
-				Partition: rec.Partition,
-				Offset:    rec.Offset,
-				Key:       string(rec.Key),
-				Value:     string(rec.Value),
-				Timestamp: ts,
-			})
+
+	for i := 0; i < 5; i++ {
+		fetches := client.PollRecords(ctx, maxMessages)
+		if fetches.IsClientClosed() {
+			return nil, fmt.Errorf("client is closed")
 		}
-		if len(messages) >= maxMessages {
-			break
+
+		if errs := fetches.Errors(); len(errs) > 0 {
+			return nil, fmt.Errorf("fetch error: %w", errs[0].Err)
 		}
+
+		tmpRecords := fetches.Records()
+		for _, rec := range tmpRecords {
+			ts := rec.Timestamp.UnixMilli()
+			if ts >= startTime && ts <= endTime {
+				messages = append(messages, Message{
+					Topic:     rec.Topic,
+					Partition: rec.Partition,
+					Offset:    rec.Offset,
+					Key:       string(rec.Key),
+					Value:     string(rec.Value),
+					Timestamp: ts,
+				})
+			}
+			if len(messages) >= maxMessages {
+				break
+			}
+		}
+		c.kgoClient.CommitRecords(ctx, tmpRecords...)
 	}
-	c.kgoClient.CommitRecords(ctx, tmpRecords...)
 
 	slog.InfoContext(ctx, "Successfully consumed messages by time range", "count", len(messages))
 	return messages, nil
